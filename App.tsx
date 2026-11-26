@@ -1,351 +1,425 @@
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import JSZip from 'jszip';
 
-import React, { useState, useCallback, useRef } from 'react';
-import JSZip from 'https://esm.sh/jszip';
+// JPEG quality used for every conversion (same as the original app).
+const JPEG_QUALITY = 0.95;
+// How many images are decoded at the same time. Decoding many large images at
+// once can crash a phone browser tab, so they are processed in a small queue.
+const CONCURRENCY = 2;
 
-const Spinner: React.FC = () => (
-  <div className="flex flex-col items-center justify-center gap-4">
-    <svg className="animate-spin h-8 w-8 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-    </svg>
-    <p className="text-lg text-slate-300">جاري التحويل...</p>
-  </div>
-);
+type Status = 'waiting' | 'converting' | 'done' | 'error';
 
-interface AlertProps {
-  message: string;
-}
-const Alert: React.FC<AlertProps> = ({ message }) => (
-  <div className="bg-red-500/20 border border-red-500 text-red-300 px-4 py-3 rounded-lg relative text-sm" role="alert">
-    <strong className="font-bold">خطأ: </strong>
-    <span className="block sm:inline">{message}</span>
-  </div>
-);
-
-
-interface FileUploaderProps {
-  onFileSelect: (files: FileList) => void;
-  isConverting: boolean;
-  fileInputRef: React.RefObject<HTMLInputElement>;
-}
-const FileUploader: React.FC<FileUploaderProps> = ({ onFileSelect, isConverting, fileInputRef }) => {
-  const [isDragging, setIsDragging] = useState(false);
-
-  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (event.target.files && event.target.files.length > 0) {
-      onFileSelect(event.target.files);
-    }
-  };
-  
-  const handleDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(true);
-  };
-  
-  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-  };
-  
-  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-  };
-  
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      onFileSelect(e.dataTransfer.files);
-    }
-  };
-
-  return (
-    <div className="w-full max-w-lg mx-auto flex flex-col items-center justify-center gap-6">
-      <div 
-        className={`w-full p-8 border-2 border-dashed rounded-xl transition-colors duration-300 ${isDragging ? 'border-sky-400 bg-sky-900/50' : 'border-slate-600 hover:border-slate-500'}`}
-        onDragEnter={handleDragEnter}
-        onDragLeave={handleDragLeave}
-        onDragOver={handleDragOver}
-        onDrop={handleDrop}
-      >
-        <input
-          type="file"
-          accept="image/avif,image/webp"
-          onChange={handleFileChange}
-          className="hidden"
-          ref={fileInputRef}
-          disabled={isConverting}
-          multiple
-        />
-        <div className="flex flex-col items-center text-center gap-4">
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-          </svg>
-          <p className="text-slate-300">
-            اسحب وأفلت ملفات AVIF أو WebP هنا
-          </p>
-          <p className="text-slate-500">أو</p>
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isConverting}
-            className="px-6 py-2 bg-sky-600 text-white font-semibold rounded-lg hover:bg-sky-500 disabled:bg-slate-500 disabled:cursor-not-allowed transition-colors"
-          >
-            اختر ملفات
-          </button>
-        </div>
-      </div>
-      <p className="text-sm text-slate-500">يتم قبول ملفات .avif و .webp</p>
-    </div>
-  );
-};
-
-interface ConvertedFile {
+interface Item {
   id: string;
   file: File;
-  originalUrl: string;
-  convertedUrl: string | null;
-  status: 'converting' | 'done' | 'error';
+  status: Status;
+  blob: Blob | null;
+  url: string | null;
+  outName: string;
   error: string | null;
 }
 
-const ImageCard: React.FC<{ fileData: ConvertedFile }> = ({ fileData }) => {
-  const fileTypeLabel = fileData.file.type.includes('webp') ? 'WebP' : 'AVIF';
-
-  return (
-    <div className="bg-slate-800/50 p-4 rounded-lg border border-slate-700 flex flex-col gap-4">
-      <h3 className="text-md font-semibold text-slate-300 truncate" title={fileData.file.name}>
-        {fileData.file.name}
-      </h3>
-      <div className="grid grid-cols-2 gap-3">
-        <div className="flex flex-col items-center gap-2">
-          <h4 className="text-sm text-slate-400">الأصل ({fileTypeLabel})</h4>
-          <div className="w-full aspect-square flex items-center justify-center overflow-hidden rounded-md bg-slate-900/50">
-            <img src={fileData.originalUrl} alt="Original" className="max-w-full max-h-full object-contain" />
-          </div>
-        </div>
-        <div className="flex flex-col items-center gap-2">
-          <h4 className="text-sm text-slate-400">النتيجة (JPG)</h4>
-          <div className="w-full aspect-square flex items-center justify-center overflow-hidden rounded-md bg-slate-900/50">
-            {fileData.status === 'converting' && <Spinner />}
-            {fileData.status === 'done' && fileData.convertedUrl && (
-              <img src={fileData.convertedUrl} alt="Converted" className="max-w-full max-h-full object-contain" />
-            )}
-            {fileData.status === 'error' && fileData.error && <Alert message={fileData.error} />}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+const isSupported = (file: File) => {
+  const name = file.name.toLowerCase();
+  return file.type === 'image/avif' || file.type === 'image/webp' || name.endsWith('.avif') || name.endsWith('.webp');
 };
 
-export default function App() {
-  const [files, setFiles] = useState<ConvertedFile[]>([]);
-  const [isConverting, setIsConverting] = useState(false);
-  const [isZipping, setIsZipping] = useState(false);
-  const [globalError, setGlobalError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+const formatLabel = (file: File) => {
+  const name = file.name.toLowerCase();
+  return file.type === 'image/avif' || name.endsWith('.avif') ? 'AVIF' : 'WebP';
+};
 
-  const resetState = () => {
-    files.forEach(f => {
-      URL.revokeObjectURL(f.originalUrl);
-      if (f.convertedUrl && f.convertedUrl.startsWith('blob:')) URL.revokeObjectURL(f.convertedUrl);
-    });
-    setFiles([]);
-    setGlobalError(null);
-    setIsConverting(false);
-    setIsZipping(false);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
-  };
+function formatSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
-  const convertFileToJpg = useCallback(async (inputFile: File, id: string) => {
-    return new Promise<void>((resolve) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(inputFile);
+/** Gives every output a unique ".jpg" name, so two files called "a" don't overwrite each other in the ZIP. */
+function makeOutNames(files: File[]) {
+  const used = new Set<string>();
+  return files.map((file) => {
+    const base = file.name.replace(/\.(avif|webp)$/i, '') || 'image';
+    let name = `${base}.jpg`;
+    for (let n = 2; used.has(name.toLowerCase()); n++) name = `${base} (${n}).jpg`;
+    used.add(name.toLowerCase());
+    return name;
+  });
+}
 
-      reader.onload = (e) => {
-        const img = new Image();
-        img.src = e.target?.result as string;
-
-        img.onload = () => {
-          const canvas = document.createElement('canvas');
-          canvas.width = img.width;
-          canvas.height = img.height;
-          const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            setFiles(prev => prev.map(f => f.id === id ? { ...f, status: 'error', error: 'لا يمكن إنشاء سياق للرسم.' } : f));
-            resolve();
-            return;
-          }
-          ctx.drawImage(img, 0, 0);
-          
-          // Use blob for potentially better memory handling with ZIP
-          canvas.toBlob((blob) => {
-            if (blob) {
-              const url = URL.createObjectURL(blob);
-              setFiles(prev => prev.map(f => f.id === id ? { ...f, status: 'done', convertedUrl: url } : f));
-            } else {
-               setFiles(prev => prev.map(f => f.id === id ? { ...f, status: 'error', error: 'فشل إنشاء الصورة.' } : f));
-            }
-            resolve();
-          }, 'image/jpeg', 0.95);
-        };
-
-        img.onerror = () => {
-          setFiles(prev => prev.map(f => f.id === id ? { ...f, status: 'error', error: 'فشل تحميل الصورة.' } : f));
-          resolve();
-        };
-      };
-
-      reader.onerror = () => {
-        setFiles(prev => prev.map(f => f.id === id ? { ...f, status: 'error', error: 'فشل قراءة الملف.' } : f));
-        resolve();
-      };
-    });
-  }, []);
-
-  const handleFileSelect = async (fileList: FileList) => {
-    resetState();
-    setGlobalError(null);
-    
-    const validFiles = Array.from(fileList).filter(file => {
-      const type = file.type;
-      const name = file.name.toLowerCase();
-      if (type === 'image/avif' || type === 'image/webp' || name.endsWith('.avif') || name.endsWith('.webp')) return true;
-      setGlobalError(prev => (prev ? prev + ", " : "") + `${file.name} ليس ملف AVIF أو WebP.`);
-      return false;
-    });
-
-    if (validFiles.length === 0 && fileList.length > 0) {
-       setGlobalError('لم يتم تحديد أي ملفات مدعومة (AVIF أو WebP).');
-       return;
-    }
-    
-    if (validFiles.length === 0) return;
-
-    setIsConverting(true);
-
-    const newFiles: ConvertedFile[] = validFiles.map(file => ({
-      id: `${file.name}-${file.lastModified}-${Math.random()}`,
-      file,
-      originalUrl: URL.createObjectURL(file),
-      convertedUrl: null,
-      status: 'converting',
-      error: null,
-    }));
-    
-    setFiles(newFiles);
-
-    await Promise.all(newFiles.map(f => convertFileToJpg(f.file, f.id)));
-    
-    setIsConverting(false);
-  };
-  
-  const handleDownloadAllAsZip = async () => {
-    const convertedFiles = files.filter(f => f.status === 'done' && f.convertedUrl);
-    if (convertedFiles.length === 0) return;
-
-    setIsZipping(true);
+/** Decodes an AVIF/WebP file and re-encodes it as JPEG on a white background. */
+async function convertToJpg(file: File): Promise<Blob> {
+  const src = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    img.decoding = 'async';
+    img.src = src;
     try {
-      const zip = new JSZip();
-      
-      for (const f of convertedFiles) {
-        // Fetch the blob content from the object URL
-        const response = await fetch(f.convertedUrl!);
-        const blob = await response.blob();
-        
-        // Sanitize file name: remove original extension and add .jpg
-        const baseName = f.file.name.replace(/\.(avif|webp)$/i, '');
-        const fileName = `${baseName}.jpg`;
-        
-        zip.file(fileName, blob);
-      }
-
-      const zipContent = await zip.generateAsync({ type: 'blob' });
-      const downloadUrl = URL.createObjectURL(zipContent);
-      
-      const link = document.createElement('a');
-      link.href = downloadUrl;
-      link.download = 'converted_images.zip';
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(downloadUrl);
-    } catch (err) {
-      console.error(err);
-      setGlobalError("حدث خطأ أثناء إنشاء ملف ZIP. يرجى المحاولة مرة أخرى.");
-    } finally {
-      setIsZipping(false);
+      await img.decode();
+    } catch {
+      throw new Error('مقدرتش أفتح الصورة. ممكن الملف يكون بايظ أو المتصفح مش بيدعم الصيغة دي، جرّب كروم.');
     }
+    const width = img.naturalWidth;
+    const height = img.naturalHeight;
+    if (!width || !height) throw new Error('الصورة فاضية أو بايظة.');
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('المتصفح مقدرش يجهّز الصورة للتحويل.');
+    // JPG has no transparency: without this, transparent areas turn black.
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0);
+
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', JPEG_QUALITY));
+    // Free the canvas memory right away (matters on phones).
+    canvas.width = 0;
+    canvas.height = 0;
+    if (!blob) throw new Error('الصورة أكبر من اللي المتصفح يقدر يحوّله.');
+    return blob;
+  } finally {
+    URL.revokeObjectURL(src);
+  }
+}
+
+function downloadUrl(url: string, name: string) {
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+const Spinner = ({ className = 'h-5 w-5' }: { className?: string }) => (
+  <svg className={`animate-spin ${className}`} fill="none" viewBox="0 0 24 24" aria-hidden="true">
+    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+  </svg>
+);
+
+const DownloadIcon = () => (
+  <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+  </svg>
+);
+
+function Badge({ children, tone = 'light' }: { children: React.ReactNode; tone?: 'light' | 'wine' }) {
+  return (
+    <span
+      dir="ltr"
+      className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold ${
+        tone === 'wine' ? 'bg-wine text-white' : 'border border-cream-300 bg-white text-ink-soft'
+      }`}
+    >
+      {children}
+    </span>
+  );
+}
+
+function DropZone({ onFiles }: { onFiles: (files: File[]) => void }) {
+  const [dragging, setDragging] = useState(false);
+  const depth = useRef(0);
+
+  const stop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
   };
-  
-  const completedCount = files.filter(f => f.status === 'done').length;
-  const canDownload = !isConverting && !isZipping && completedCount > 0;
 
   return (
-    <div className="bg-slate-900 min-h-screen text-white font-sans p-4 sm:p-8 flex flex-col items-center">
-      <div className="w-full max-w-7xl mx-auto flex flex-col items-center text-center">
-        <header className="mb-8 md:mb-12">
-          <h1 className="text-4xl sm:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-sky-400 to-cyan-300">
-            محول AVIF و WebP إلى JPG
-          </h1>
-          <p className="mt-4 text-lg text-slate-400">
-            حوّل صورك من صيغة AVIF أو WebP إلى JPG بسهولة ومباشرة في متصفحك.
+    <label
+      htmlFor="file-input"
+      onDragEnter={(e) => {
+        stop(e);
+        depth.current++;
+        setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        stop(e);
+        depth.current = Math.max(0, depth.current - 1);
+        if (depth.current === 0) setDragging(false);
+      }}
+      onDragOver={stop}
+      onDrop={(e) => {
+        stop(e);
+        depth.current = 0;
+        setDragging(false);
+        if (e.dataTransfer.files?.length) onFiles(Array.from(e.dataTransfer.files));
+      }}
+      className={`flex cursor-pointer flex-col items-center gap-4 rounded-3xl border-2 border-dashed px-5 py-10 text-center transition-colors sm:py-14 ${
+        dragging ? 'border-wine bg-wine-soft' : 'border-cream-300 bg-cream-100 hover:border-wine-line hover:bg-wine-soft/40'
+      }`}
+    >
+      <input
+        id="file-input"
+        type="file"
+        accept="image/avif,image/webp,.avif,.webp"
+        multiple
+        className="sr-only"
+        onChange={(e) => {
+          const files = Array.from(e.target.files || []);
+          e.target.value = '';
+          if (files.length) onFiles(files);
+        }}
+      />
+      <span className="flex h-16 w-16 items-center justify-center rounded-3xl bg-white text-wine shadow-card">
+        <svg className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.6} aria-hidden="true">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+        </svg>
+      </span>
+      <div>
+        <p className="text-lg font-bold">اسحب الصور هنا</p>
+        <p className="mt-1 text-sm text-ink-muted">أو دوس واختار من جهازك، تقدر تختار كذا صورة مرة واحدة</p>
+      </div>
+      <span className="btn-primary px-7 py-3 text-base">اختار الصور</span>
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <Badge>AVIF</Badge>
+        <Badge>WebP</Badge>
+        <span className="text-ink-muted" aria-hidden="true">←</span>
+        <Badge tone="wine">JPG</Badge>
+      </div>
+    </label>
+  );
+}
+
+function ResultCard({ item }: { item: Item }) {
+  return (
+    <article className="card flex min-w-0 flex-col overflow-hidden animate-fadeUp">
+      <div className="relative flex aspect-[4/3] items-center justify-center bg-cream-200">
+        {item.status === 'done' && item.url && (
+          <img src={item.url} alt={item.outName} className="h-full w-full object-contain" loading="lazy" />
+        )}
+        {(item.status === 'waiting' || item.status === 'converting') && (
+          <div className="shimmer-bg absolute inset-0 flex animate-shimmer flex-col items-center justify-center gap-2 text-ink-soft">
+            {item.status === 'converting' ? <Spinner className="h-7 w-7 text-wine" /> : null}
+            <span className="text-sm font-semibold">{item.status === 'converting' ? 'بنحوّل...' : 'في الدور...'}</span>
+          </div>
+        )}
+        {item.status === 'error' && (
+          <div className="flex flex-col items-center gap-2 px-4 text-center text-sm text-red-700">
+            <svg className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+            </svg>
+            <p>{item.error}</p>
+          </div>
+        )}
+        <span className="absolute right-3 top-3">
+          <Badge>{formatLabel(item.file)}</Badge>
+        </span>
+      </div>
+      <div className="flex items-center gap-3 p-4">
+        <div className="min-w-0 flex-1">
+          <h3 className="truncate text-sm font-bold" dir="auto" title={item.outName}>
+            {item.outName}
+          </h3>
+          <p className="mt-0.5 text-xs text-ink-muted">
+            <span dir="ltr">{formatSize(item.file.size)}</span>
+            {item.blob && (
+              <>
+                {' '}
+                ← <span dir="ltr">{formatSize(item.blob.size)}</span>
+              </>
+            )}
           </p>
-        </header>
+        </div>
+        <button
+          type="button"
+          onClick={() => item.url && downloadUrl(item.url, item.outName)}
+          disabled={item.status !== 'done'}
+          className="btn-ghost shrink-0 px-3 py-2 text-sm disabled:opacity-40"
+          aria-label={`نزّل ${item.outName}`}
+        >
+          <DownloadIcon />
+          نزّل
+        </button>
+      </div>
+    </article>
+  );
+}
 
-        <main className="w-full">
-          {files.length === 0 && <FileUploader onFileSelect={handleFileSelect} isConverting={isConverting} fileInputRef={fileInputRef} />}
+export default function App() {
+  const [items, setItems] = useState<Item[]>([]);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [zipping, setZipping] = useState(false);
+  // Bumped on every new batch / reset so late results from an old batch are dropped.
+  const generation = useRef(0);
+  const itemsRef = useRef<Item[]>([]);
+  itemsRef.current = items;
 
-          {globalError && (
-            <div className="my-6 max-w-lg mx-auto">
-              <Alert message={globalError} />
-            </div>
-          )}
+  const revokeAll = (list: Item[]) => list.forEach((i) => i.url && URL.revokeObjectURL(i.url));
 
-          {files.length > 0 && (
-            <div className="w-full flex flex-col items-center gap-8">
-               <div className="flex flex-col sm:flex-row gap-4">
-                  <button
-                    onClick={handleDownloadAllAsZip}
-                    disabled={!canDownload}
-                    className="flex items-center justify-center gap-2 px-8 py-3 bg-green-600 text-white font-bold rounded-lg hover:bg-green-500 disabled:bg-slate-600 disabled:cursor-not-allowed transition-colors text-lg"
-                  >
-                    {isZipping ? (
-                      <>
-                        <svg className="animate-spin h-5 w-5 text-white" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                        جاري الضغط...
-                      </>
-                    ) : (
-                      `تحميل الكل كملف ZIP (${completedCount})`
-                    )}
-                  </button>
-                  <button
-                    onClick={resetState}
-                    disabled={isZipping}
-                    className="px-8 py-3 bg-slate-700 text-slate-200 font-bold rounded-lg hover:bg-slate-600 transition-colors text-lg disabled:opacity-50"
-                  >
-                    البدء من جديد
-                  </button>
-                </div>
+  useEffect(() => () => revokeAll(itemsRef.current), []);
 
-              <div className="w-full grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-                {files.map(fileData => (
-                  <ImageCard key={fileData.id} fileData={fileData} />
-                ))}
+  const reset = useCallback(() => {
+    generation.current++;
+    revokeAll(itemsRef.current);
+    setItems([]);
+    setNotice(null);
+    setZipping(false);
+  }, []);
+
+  const update = (gen: number, id: string, patch: Partial<Item>) => {
+    if (gen !== generation.current) {
+      if (patch.url) URL.revokeObjectURL(patch.url);
+      return;
+    }
+    setItems((prev) => prev.map((i) => (i.id === id ? { ...i, ...patch } : i)));
+  };
+
+  const handleFiles = async (picked: File[]) => {
+    reset();
+    const gen = generation.current;
+    const valid = picked.filter(isSupported);
+    const skipped = picked.length - valid.length;
+
+    if (!valid.length) {
+      setNotice('الملفات دي مش بصيغة AVIF أو WebP. اختار صور بالصيغ دي بس.');
+      return;
+    }
+    if (skipped) setNotice(`اتجاهل ${skipped} ملف لأنه مش بصيغة AVIF أو WebP.`);
+
+    const names = makeOutNames(valid);
+    const batch: Item[] = valid.map((file, i) => ({
+      id: `${gen}-${i}`,
+      file,
+      status: 'waiting',
+      blob: null,
+      url: null,
+      outName: names[i],
+      error: null,
+    }));
+    setItems(batch);
+
+    let next = 0;
+    const worker = async () => {
+      while (next < batch.length && gen === generation.current) {
+        const item = batch[next++];
+        update(gen, item.id, { status: 'converting' });
+        try {
+          const blob = await convertToJpg(item.file);
+          update(gen, item.id, { status: 'done', blob, url: URL.createObjectURL(blob) });
+        } catch (err) {
+          update(gen, item.id, { status: 'error', error: err instanceof Error ? err.message : 'حصلت مشكلة في التحويل.' });
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, batch.length) }, worker));
+  };
+
+  const done = items.filter((i) => i.status === 'done');
+  const failed = items.filter((i) => i.status === 'error').length;
+  const finished = done.length + failed;
+  const busy = items.length > 0 && finished < items.length;
+  const progress = items.length ? Math.round((finished / items.length) * 100) : 0;
+
+  const downloadAll = async () => {
+    if (!done.length) return;
+    if (done.length === 1) {
+      downloadUrl(done[0].url!, done[0].outName);
+      return;
+    }
+    setZipping(true);
+    try {
+      const zip = new JSZip();
+      // JPEGs are already compressed, so store them as-is (much faster).
+      done.forEach((i) => zip.file(i.outName, i.blob!, { compression: 'STORE' }));
+      const content = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(content);
+      downloadUrl(url, 'converted-images.zip');
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    } catch (err) {
+      console.error(err);
+      setNotice('حصلت مشكلة وأنا بجهّز الملف المضغوط. جرّب تاني.');
+    } finally {
+      setZipping(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen pb-16">
+      <header className="sticky top-0 z-40 border-b border-cream-300/70 bg-cream/85 backdrop-blur-md">
+        <div className="mx-auto flex h-16 max-w-6xl items-center gap-3 px-4 lg:px-8">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-wine text-white shadow-card">
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 21h16.5A1.5 1.5 0 0021.75 19.5V4.5A1.5 1.5 0 0020.25 3H3.75A1.5 1.5 0 002.25 4.5v15A1.5 1.5 0 003.75 21zM15.75 8.25h.008v.008h-.008V8.25z" />
+            </svg>
+          </span>
+          <div className="min-w-0 leading-tight">
+            <h1 className="text-lg font-extrabold">محوّل الصور</h1>
+            <p className="truncate text-xs text-ink-muted">حوّل صورك لصيغة JPG في ثواني</p>
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto flex max-w-6xl flex-col gap-6 px-4 pt-6 lg:px-8 lg:pt-10">
+        {items.length === 0 ? (
+          <section className="card mx-auto w-full max-w-2xl p-4 sm:p-6">
+            <DropZone onFiles={handleFiles} />
+            <p className="mt-4 flex items-start gap-2 text-sm text-ink-muted">
+              <svg className="mt-0.5 h-4 w-4 shrink-0 text-wine" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+              </svg>
+              التحويل بيحصل جوه جهازك، والصور مش بتترفع على أي سيرفر.
+            </p>
+          </section>
+        ) : (
+          <section className="card flex flex-col gap-4 p-4 sm:p-5">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <p className="text-base font-bold">
+                  {busy ? 'بنحوّل الصور...' : `خلصنا ${done.length} من ${items.length} صورة`}
+                </p>
+                <p className="mt-0.5 text-sm text-ink-muted">
+                  {busy
+                    ? `${finished} من ${items.length}`
+                    : failed
+                      ? `${failed} صورة مقدرتش أحوّلها`
+                      : 'كل الصور جاهزة للتنزيل'}
+                </p>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <button
+                  type="button"
+                  onClick={downloadAll}
+                  disabled={busy || zipping || done.length === 0}
+                  className="btn-primary px-6 py-3"
+                >
+                  {zipping ? <Spinner /> : <DownloadIcon />}
+                  {zipping
+                    ? 'بنجهّز الملف...'
+                    : done.length > 1
+                      ? `نزّل الكل في ملف مضغوط (${done.length})`
+                      : 'نزّل الصورة'}
+                </button>
+                <button type="button" onClick={reset} disabled={zipping} className="btn-ghost px-6 py-3 disabled:opacity-40">
+                  صور جديدة
+                </button>
               </div>
             </div>
-          )}
-        </main>
-      </div>
+            {busy && (
+              <div className="h-2 overflow-hidden rounded-full bg-cream-200" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}>
+                <div className="h-full rounded-full bg-wine transition-all duration-300" style={{ width: `${progress}%` }} />
+              </div>
+            )}
+          </section>
+        )}
+
+        {notice && (
+          <div role="alert" className="mx-auto w-full max-w-2xl rounded-2xl border border-wine-line bg-wine-soft px-4 py-3 text-sm text-wine-dark">
+            {notice}
+          </div>
+        )}
+
+        {items.length > 0 && (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {items.map((item) => (
+              <ResultCard key={item.id} item={item} />
+            ))}
+          </div>
+        )}
+      </main>
     </div>
   );
 }

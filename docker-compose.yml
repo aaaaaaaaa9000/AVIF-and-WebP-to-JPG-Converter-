@@ -1,0 +1,29 @@
+services:
+  app:
+    build: .
+    container_name: ai-app-jpg
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - APP_USERNAME=${APP_USERNAME:-user}
+      - APP_PASSWORD=${APP_PASSWORD}
+      - SESSION_DAYS=${SESSION_DAYS:-180}
+      - SESSION_SECRET=${SESSION_SECRET:-}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ai-jpg.rule=Host(`${APP_DOMAIN:-jpg.aaaaaaaaa9000.cloud}`)"
+      - "traefik.http.routers.ai-jpg.entrypoints=websecure"
+      - "traefik.http.routers.ai-jpg.tls=true"
+      - "traefik.http.routers.ai-jpg.tls.certresolver=letsencrypt"
+      - "traefik.http.services.ai-jpg.loadbalancer.server.port=3000"
+      - "traefik.docker.network=automation-stack_automation-network"
+
+networks:
+  default:
+    name: automation-stack_automation-network
+    external: true
